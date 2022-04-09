@@ -1,0 +1,394 @@
+#!/usr/bin/env bash
+
+export LANG=C
+export LC_ALL=C
+
+# Exit on error.
+set -e
+
+echo "WARNING: This utility has not been thoroughly tested. It could freeze the machine or panic the kernel."
+echo "         Maybe it won't, but anyway, make sure you have viewed each line of its code and that you fully understand them."
+echo "INFO: Press return / enter to continue: "
+read
+# echo "         Edit the source code and remove the next exit statement."
+# exit -1
+
+# Initialize variables.
+newinit=
+newroot=/
+putold=/._tmp_reinit/oldroot
+for i in nokill nostop keepfd; do
+	eval $i=0
+done
+
+# Parse options.
+options="$(getopt -o i:r:o:b::k::s::f::h::V:: -l newinit -l newroot -l putold -l bbinit -l nokill -l nostop -l keepfd -l help -l version -s bash -n reinit -- "$@")" || (echo "Try 'reinit --help' for more information." && exit 22)
+eval set -- "$options"
+
+while true; do
+	case "$1" in
+	-i|--newinit)
+		newinit="$2"
+		shift 2
+	;;
+	-r|--newroot)
+		newroot="$2"
+		shift 2
+	;;
+	-o|--putold)
+		putold="$2"
+		shift 2
+	;;
+
+	-b|--bbinit)
+		newinit='/._tmp_reinit/busybox'
+		shift 2
+	;;
+	-k|--nokill)
+		nokill=1
+		shift 2
+	;;
+	-s|--nostop)
+		nostop=1
+		shift 2
+	;;
+	-f|--keepfd)
+		keepfd=1
+		shift 2
+	;;
+
+	-h|--help)
+		cat << END
+
+Usage:
+ reinit [-i <newinit>] [-r <newroot> [-o <putold>]] [options] [-- init_options]
+
+Restart init.
+
+Options:
+ -i, --newinit  the file to execute as the new init;     dafault: current init
+ -r, --newroot  the mountpoint to use as new root;       default: /
+ -o, --putold   the path to mount the old root if --newroot is set;  dafault: /._tmp_reinit/putold
+
+ -b, --bbinit   use busybox as the new init
+ -k, --nokill   do not kill old processes; PIDs of old processes will be stored in environment variable \$oldproc
+ -s, --nostop   do not stop old processes (implies --nokill); may make the kernel panic when used with -r
+ -f, --keepfd   do not close fds for the new init
+
+ -h, --help     display this help
+ -V, --version  display version
+END
+		exit 0
+		shift 2
+	;;
+	-V|--version)
+		echo 'reinit 0.0.0'
+		exit 0
+		shift 2
+	;;
+	--)
+		shift
+		initargs=("$@")
+		break
+		shift 2
+	;;
+	*)
+		echo "ERROR: Invalid option."
+		echo "Try 'reinit --help' for more information."
+		exit 22
+	;;
+	esac
+done
+
+# Validate options and check the environment.
+
+# Environment checks
+
+qwhich() {
+	which -- "$@" >/dev/null 2>/dev/null </dev/null || return $?
+	return $?
+}
+
+if ! qwhich which; then
+	busybox_path="$(realpath "$(dirname -- "$0")"/busybox)"
+	qwhich() {
+		"$busybox_path" which -- "$@" >/dev/null 2>/dev/null </dev/null || return $?
+		return $?
+	}
+fi
+
+if ! qwhich "$(dirname -- "$0")"/{clearfd,login_tty,busybox}; then
+	echo "ERROR: Unable to find clearfd, login_tty and busybox!"
+	exit 22
+fi
+
+if [ "$(id -u)" != 0 ]; then
+	echo "ERROR: Insufficient privillege. Please run this script as root."
+	exit 1
+fi
+
+if ! qwhich telinit && ! qwhich systemctl; then
+	echo "ERROR: Unknown current init."
+	exit 22
+fi
+
+# Validate newroot.
+
+if ! realpath -- "$newroot" >/dev/null 2>/dev/null </dev/null; then
+	echo 'ERROR: newroot `'"$newroot'"' does not exist.'
+	exit 22
+fi
+
+newroot="$(realpath -- "$newroot")"
+
+if [ ! -d "$newroot" ]; then
+	echo 'ERROR: newroot `'"$newroot'"' is not a directory.'
+	exit 22
+fi
+
+if [ "x$newroot" != x/ ] && ! mountpoint -q -- "$newroot"; then
+	echo 'ERROR: newroot `'"$newroot'"' must be a mountpoint.'
+	echo "NOTE: Please mount --bind newroot newroot if newroot is not mounted before using the script."
+	exit 22
+fi
+
+if [ "x$newroot" != x/ ] && ! mountpoint -q /; then
+	echo 'ERROR: / must be a mountpoint.'
+	echo "NOTE: Please mount --bind / if / is not mounted before using the script."
+	exit 22
+fi
+
+# Validate newinit.
+
+current_init="$(readlink /proc/1/exe)"
+
+if [ -z "$newinit" ]; then
+	if qwhich "$newroot/usr/lib/systemd/systemd"; then
+		newinit="/usr/lib/systemd/systemd"
+	fi
+	if qwhich "$newroot/sbin/init"; then
+		newinit="/sbin/init"
+	fi
+	if [ "x$newroot" == x/ ] && qwhich "$current_init"; then
+		newinit="$current_init"
+	fi
+fi
+
+if [ "x$newinit" != 'x/._tmp_reinit/busybox' ] && ! qwhich "$newroot/$newinit"; then
+	echo 'ERROR: newinit `'"$newroot/$newinit'"' is not executable.'
+	exit 22
+fi
+
+# Validate putold.
+
+if ! mkdir -p -- "$newroot/$putold" >/dev/null 2>/dev/null; then
+	echo 'ERROR: putold `'"$newroot/$putold'"' or one of it'"'"'s ancestors exists and is not a directory.'
+	exit 22
+fi
+
+putold="$(realpath -- "$newroot/$putold")"
+putold="${putold:${#newroot}}"
+
+if [ "x$newroot" == x/ ]; then
+	putold=/
+fi
+
+# nostop implies nokill.
+
+if [ "$nostop" == 1 ]; then
+	nokill=1
+fi
+
+#Initialize.
+
+mkdir -p -- "$newroot"/._tmp_reinit /._tmp_reinit
+cp -- "$(dirname "$0")"/{clearfd,login_tty,busybox} "$newroot"/._tmp_reinit/
+
+cd -- "$newroot"
+
+mkdir -p ._tmp_reinit/oldroot
+mkdir -p dev proc
+
+# Save configs.
+printf "%s" "$newinit" >/._tmp_reinit/newinit
+printf "%s" "$newroot" >/._tmp_reinit/newroot
+printf "%s" "$putold" >/._tmp_reinit/putold
+escaped_initrgs="$(getopt -o '' -- -- "${initargs[@]}")"
+escaped_initrgs="${escaped_initrgs:4}"
+printf "%s" "$escaped_initrgs" >/._tmp_reinit/initargs
+printf "%s" "$current_init" >/._tmp_reinit/current_init
+
+# The new init script
+cat >._tmp_reinit/init << END
+#!$newroot/._tmp_reinit/busybox ash
+
+# Do not exit on any errors or signals.
+set +e
+trap '' \$(kill -l | sed 's/\s/\\n/g' | grep '[a-zA-Z]')
+
+# Load configs.
+newinit="\$(cat /._tmp_reinit/newinit)"
+newroot="\$(cat /._tmp_reinit/newroot)"
+putold="\$(cat /._tmp_reinit/putold)"
+initargs="\$(cat /._tmp_reinit/initargs)"
+current_init="\$(cat /._tmp_reinit/current_init)"
+nokill=$nokill
+nostop=$nostop
+keepfd=$keepfd
+
+failed=0
+
+cd "\$newroot"
+
+# Mount dev and proc if they are not mounted
+if ! mountpoint -q dev; then
+	mount -t devtmpfs udev dev
+fi
+if ! mountpoint -q proc; then
+	mount -t proc proc proc
+fi
+
+# Freeze all processes to prevent them from doing silly things (if nostop is not set), but don't kill them at this point.
+# The shell running on tty1 is still the script's session leader, so killing it would cause the script to exit.
+
+proc=""
+
+freeze() {
+	for c2 in 0 1 2; do         # Try three times with 100ms interval.
+		for c1 in 0 1 2; do     # For each try, scan three times continuously.
+
+			proc=""
+
+			for i in \$(ls -1 /proc | grep -E '^[0-9]+\$' | grep -v '^1\$'); do
+				if readlink proc/\$i/exe >/dev/null 2>/dev/null </dev/null; then     # Don't freeze kernel threads.
+
+					proc="\$proc \$i"
+
+					if [ \$c1 != 0 -o \$c2 != 0 ]; then     # The first time should be done as quick as possible, so skip this step and freeze them altogether later.
+						kill -s SIGSTOP \$i
+					fi
+				fi
+			done
+
+			kill -s SIGSTOP \$proc
+		done
+
+		sleep 0.1
+	done
+}
+
+if [ \$nostop == 0 ]; then
+	freeze
+fi
+
+if [ "x\$newroot" != x/ ]; then
+	# Make all mounts private, as pivot_root doesn't work with shared mount points.
+
+	mount --make-private / || ._tmp_reinit/busybox mount --make-private /
+
+	pwd="\$(pwd)"
+	while [ "x\$(pwd)" != x/ ]; do
+		mount --make-private . || ._tmp_reinit/busybox mount --make-private .
+		cd ..
+	done
+	cd -- "\$pwd"
+
+	mount --make-private "\$newroot/\$putold" || ._tmp_reinit/busybox mount --make-private "\$newroot/\$putold"
+
+	sleep 0.1
+
+	# Swap / and the new root.
+	if ! (pivot_root "\$newroot" "\$newroot/\$putold" || ._tmp_reinit/busybox pivot_root "\$newroot" "\$newroot/\$putold"); then
+
+		# Fallback to the original root when failed.
+		failed=1
+		newinit="\$current_init"
+		newroot=/
+		putold=/
+		nostop=0
+		nokill=0
+		keepfd=0
+		initargs=
+		freeze
+		cp -a ._tmp_reinit/clearfd ._tmp_reinit/login_tty ._tmp_reinit/busybox ._tmp_reinit/prepare_env /._tmp_reinit/
+		cd /
+	fi
+fi
+
+# Close all fds (optional), become the session and pg leader and take over tty1.
+
+export newinit putold current_init nokill proc failed
+
+if [ \$keepfd == 0 ]; then
+	eval exec /._tmp_reinit/clearfd /._tmp_reinit/login_tty /dev/tty1 /._tmp_reinit/busybox ash /._tmp_reinit/prepare_env "\$initargs"
+else
+	eval exec /._tmp_reinit/login_tty /dev/tty1 /._tmp_reinit/busybox ash /._tmp_reinit/prepare_env "\$initargs"
+fi
+
+# Next step
+END
+chmod +x ._tmp_reinit/init
+cat >._tmp_reinit/prepare_env << END
+
+set +e
+trap '' \$(kill -l | sed 's/\s/\\n/g' | grep '[a-zA-Z]')
+
+cd /
+
+# Now it's safe to kill all old processes.
+if [ \$nokill == 0 -a ! -z "\$proc" ]; then
+	kill -9 \$proc >/dev/null 2>/dev/null </dev/null
+fi
+
+# Unmount the old init.
+/._tmp_reinit/busybox umount -- "\$putold/\$current_init"
+
+# Alert when failed.
+if [ \$failed == 1 ]; then
+	echo "reinit: ERROR: Failed to pivot_root. Falling back to the original root and init in 3 seconds."
+	sleep 3
+fi
+
+# Execute the new init in a clean environment.
+if [ \$nokill == 0 ]; then
+	exec /._tmp_reinit/busybox env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "\$newinit" "\$@"
+else
+	exec /._tmp_reinit/busybox env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin oldproc="\$proc" "\$newinit" "\$@"
+fi
+END
+
+# Mount the init script on the current init.
+mount --bind -- ._tmp_reinit/init "$current_init"
+
+trap '' $(kill -l | sed 's/\s/\n/g' | grep '[a-zA-Z]')
+set +e
+
+# Stop display managers, otherwise tty1 would get frozen.
+if [ $nostop == 0 ]; then
+	for i in brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager; do
+		service $i stop >/dev/null 2>/dev/null </dev/null
+	done
+	systemctl stop brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager >/dev/null 2>/dev/null </dev/null
+	sleep 2
+fi
+
+
+
+# Seize the tty, so no messy outputs are going to them.
+if [ $nostop == 0 ]; then
+	._tmp_reinit/login_tty /dev/tty1 sleep 99999999 &
+	sleep 0.2
+fi
+
+# Go to tty1.
+chvt 1 >/dev/null 2>/dev/null </dev/null || ._tmp_reinit/busybox chvt 1 >/dev/null 2>/dev/null </dev/null || true
+sleep 0.1
+
+# Restart init.
+(telinit u >/dev/null 2>/dev/null </dev/null &)
+(systemctl daemon-reexec >/dev/null 2>/dev/null </dev/null &)
+
+# Stop the shell and getty to prevent them from exiting automatically, which resets the new init's controlling console and make it exit.
+if [ $nostop == 0 ]; then
+	killall -s SIGSTOP -- systemd-logind getty login "$(basename "$SHELL")" ash bash rbash bsh busybox csh dash esh fish ion ipython ksh mksh oh rc sh tcsh zsh node python python-3 python3 python-2 python2 nano vi vim ash bash rbash bsh busybox csh dash esh fish ion ipython ksh mksh oh rc sh tcsh zsh node python python-3 python3 python-2 python2 nano vi vim "$(basename "$SHELL")" login getty systemd-logind >/dev/null 2>/dev/null </dev/null
+fi
