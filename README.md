@@ -26,7 +26,7 @@ Options:
 ```
 Examples:
 ```bash
-### DO NOT COPY & PASTE ###
+### DO NOT COPY & PASTE (PSEUDO CODE) ###
 ### DO NOT COPY & PASTE ###
 ### DO NOT COPY & PASTE ###
 
@@ -46,5 +46,25 @@ chroot /live systemctl enable iwd dhcpcd
 # Login as root, and you are now in a live recovery environment. You can umount /mnt, format the disk, and install another linux.
 # After the installation, you can use this utility again to enter your new dist (if you don't mind running an old version of linux kernel).
 
-2. 
+2. Convert an ext4 root to btrfs
+
+pacman -S arch-install-scripts
+mkdir /live
+pacstrap -c /live base iwd dhcpcd vim busybox e2fsprogs btrfsprogs dosfstools openssh arch-install-scripts
+cp -a /usr/lib/modules /live/usr/lib/
+chroot /live passwd
+cp * /mnt/root/
+./reinit -r /live -o /mnt
+# Wait.
+umount -R /mnt
+btrfs-convert /dev/DISK_DEVICE
+mount /dev/DISK_DEVICE /mnt
+mount /dev/ESP_DEVICE /mnt/boot/efi
+genfstab -U /mnt >/mnt/etc/fstab
+arch-chroot /mnt grub-install --removable
+arch-chroot /mnt grub-mkconfig -o /boot/grub/grub.cfg
+arch-chroot /mnt mkinitpio -P
+./reinit -r /mnt -o /live
+# Wait.
+umount -R /live
 ```
