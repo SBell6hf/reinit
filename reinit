@@ -66,9 +66,9 @@ Usage:
 Restart init.
 
 Options:
- -i, --newinit  the file to execute as the new init;     dafault: current init
+ -i, --newinit  the file to execute as the new init;     default: current init
  -r, --newroot  the mountpoint to use as new root;       default: /
- -o, --putold   the path to mount the old root if --newroot is set;  dafault: /._tmp_reinit/putold
+ -o, --putold   the path to mount the old root if --newroot is set;  default: /._tmp_reinit/putold
 
  -b, --bbinit   use busybox as the new init
  -k, --nokill   do not kill old processes; PIDs of old processes will be stored in environment variable \$oldproc
