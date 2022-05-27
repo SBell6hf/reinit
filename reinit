@@ -6,10 +6,11 @@ export LC_ALL=C
 # Exit on error.
 set -e
 
-echo "WARNING: This utility has not been thoroughly tested. It could freeze the machine or panic the kernel."
-echo "         Maybe it won't, but anyway, make sure you have viewed each line of its code and that you fully understand them."
-echo "INFO: Press return / enter to continue: "
-read
+# echo "WARNING: This utility has not been thoroughly tested. It could freeze the machine or panic the kernel."
+# echo "         Maybe it won't, but anyway, make sure you have viewed each line of its code and that you fully understand them."
+# echo
+#echo "INFO: Press return / enter to continue: "
+#read
 # echo "         Edit the source code and remove the next exit statement."
 # exit -1
 
@@ -17,12 +18,13 @@ read
 newinit=
 newroot=/
 putold=/._tmp_reinit/oldroot
+umount=d
 for i in nokill nostop keepfd; do
 	eval $i=0
 done
 
 # Parse options.
-options="$(getopt -o i:r:o:b::k::s::f::h::V:: -l newinit -l newroot -l putold -l bbinit -l nokill -l nostop -l keepfd -l help -l version -s bash -n reinit -- "$@")" || (echo "Try 'reinit --help' for more information." && exit 22)
+options="$(getopt -o i:r:o:b::k::s::f::u::h::V:: -l newinit -l newroot -l putold -l bbinit -l nokill -l nostop -l keepfd -l umount -l no-umount -l help -l version -s bash -n reinit -- "$@")" || (echo "Try 'reinit --help' for more information." && exit 22)
 eval set -- "$options"
 
 while true; do
@@ -39,11 +41,11 @@ while true; do
 		putold="$2"
 		shift 2
 	;;
-
 	-b|--bbinit)
 		newinit='/._tmp_reinit/busybox'
 		shift 2
 	;;
+
 	-k|--nokill)
 		nokill=1
 		shift 2
@@ -54,6 +56,14 @@ while true; do
 	;;
 	-f|--keepfd)
 		keepfd=1
+		shift 2
+	;;
+	-u|--umount)
+		umount=1
+		shift 2
+	;;
+	--no-umount)
+		umount=0
 		shift 2
 	;;
 
@@ -69,11 +79,13 @@ Options:
  -i, --newinit  the file to execute as the new init;     default: current init
  -r, --newroot  the mountpoint to use as new root;       default: /
  -o, --putold   the path to mount the old root if --newroot is set;  default: /._tmp_reinit/putold
+ -b, --bbinit   use busybox as the new init; you'll need to spicify an applet in init_options
 
- -b, --bbinit   use busybox as the new init
- -k, --nokill   do not kill old processes; PIDs of old processes will be stored in environment variable \$oldproc
- -s, --nostop   do not stop old processes (implies --nokill); may make the kernel panic when used with -r
- -f, --keepfd   do not close fds for the new init
+ -k, --nokill      do not kill old processes; PIDs of old processes will be stored in environment variable \$oldproc
+ -s, --nostop      do not stop old processes (implies --nokill); may make the kernel panic when used with -r
+ -f, --keepfd      do not close fds for the new init
+ -u, --umount      umount /proc, /dev, /sys, /run, /tmp (default when newroot == / && !nostop)
+     --no-umount   do not umount /proc, /dev, /sys, /run, /tmp (default)
 
  -h, --help     display this help
  -V, --version  display version
@@ -82,7 +94,7 @@ END
 		shift 2
 	;;
 	-V|--version)
-		echo 'reinit 0.0.0'
+		echo 'reinit 1.0.0'
 		exit 0
 		shift 2
 	;;
@@ -104,13 +116,14 @@ done
 
 # Environment checks
 
+busybox_path="$(realpath "$(dirname -- "$0")"/busybox)"
+
 qwhich() {
 	which -- "$@" >/dev/null 2>/dev/null </dev/null || return $?
 	return $?
 }
 
 if ! qwhich which; then
-	busybox_path="$(realpath "$(dirname -- "$0")"/busybox)"
 	qwhich() {
 		"$busybox_path" which -- "$@" >/dev/null 2>/dev/null </dev/null || return $?
 		return $?
@@ -130,6 +143,29 @@ fi
 if ! qwhich telinit && ! qwhich systemctl; then
 	echo "ERROR: Unknown current init."
 	exit 22
+fi
+
+# Validate initargs when the new init is busybox.
+
+if [ "x$newinit" == 'x/._tmp_reinit/busybox' ]; then
+
+	if [ "x${initargs[*]}" == "x" ]; then
+		echo 'ERROR: No busybox applet specified.'
+		exit 22
+	fi
+
+	bbapplets=($("$busybox_path" --list))
+	bbvalidapplet=0
+	for i in "${bbapplets[@]}"; do
+		if [ "x$i" == "x${initargs[0]}" ]; then
+			bbvalidapplet=1
+		fi
+	done
+	
+	if [ $bbvalidapplet == 0 ]; then
+		echo 'ERROR: Invalid busybox applet `'"${initargs[0]}'"'.'
+		exit 22
+	fi
 fi
 
 # Validate newroot.
@@ -199,6 +235,16 @@ if [ "$nostop" == 1 ]; then
 	nokill=1
 fi
 
+# umount
+
+if [ $umount == d ]; then
+	if [ "x$newroot" == x/ -a $nostop == 0 ]; then
+		umount=1
+	else
+		umount=0
+	fi
+fi
+
 #Initialize.
 
 mkdir -p -- "$newroot"/._tmp_reinit /._tmp_reinit
@@ -222,6 +268,9 @@ printf "%s" "$current_init" >/._tmp_reinit/current_init
 cat >._tmp_reinit/init << END
 #!$newroot/._tmp_reinit/busybox ash
 
+# From now on we'll use sync frequently to avoid losing unsynced data if we panic.
+sync
+
 # Do not exit on any errors or signals.
 set +e
 trap '' \$(kill -l | sed 's/\s/\\n/g' | grep '[a-zA-Z]')
@@ -235,10 +284,12 @@ current_init="\$(cat /._tmp_reinit/current_init)"
 nokill=$nokill
 nostop=$nostop
 keepfd=$keepfd
+umount=$umount
 
 failed=0
 
 cd "\$newroot"
+sync
 
 # Mount dev and proc if they are not mounted
 if ! mountpoint -q dev; then
@@ -252,53 +303,66 @@ fi
 # The shell running on tty1 is still the script's session leader, so killing it would cause the script to exit.
 
 proc=""
-
 freeze() {
-	for c2 in 0 1 2; do         # Try three times with 100ms interval.
-		for c1 in 0 1 2; do     # For each try, scan three times continuously.
-
-			proc=""
-
-			for i in \$(ls -1 /proc | grep -E '^[0-9]+\$' | grep -v '^1\$'); do
-				if readlink proc/\$i/exe >/dev/null 2>/dev/null </dev/null; then     # Don't freeze kernel threads.
-
-					proc="\$proc \$i"
-
-					if [ \$c1 != 0 -o \$c2 != 0 ]; then     # The first time should be done as quick as possible, so skip this step and freeze them altogether later.
-						kill -s SIGSTOP \$i
-					fi
-				fi
-			done
-
-			kill -s SIGSTOP \$proc
-		done
-
+	for c2 in 0 1 2; do     # Try three times with 100ms interval.
+		sync
+		kill -SIGSTOP -1
+		sync
 		sleep 0.1
+	done
+	sync
+
+	# Save the processes we've freezed.
+	for i in \$(ls -1 /proc | grep -E '^[0-9]+\$' | grep -v '^1\$'); do
+		if readlink proc/\$i/exe >/dev/null 2>/dev/null </dev/null; then     # Skip kernel threads.
+			proc="\$proc \$i"
+		fi
 	done
 }
 
 if [ \$nostop == 0 ]; then
+	sync
 	freeze
 fi
+
+sync
+
+if [ \$umount == 1 ]; then
+	umount -lf /proc /dev /sys /run /tmp
+
+	if ! mountpoint -q dev; then
+		mount -t devtmpfs udev dev
+	fi
+	if ! mountpoint -q proc; then
+		mount -t proc proc proc
+	fi
+fi
+
+sync
 
 if [ "x\$newroot" != x/ ]; then
 	# Make all mounts private, as pivot_root doesn't work with shared mount points.
 
+	sync
 	mount --make-private / || ._tmp_reinit/busybox mount --make-private /
+	sync
 
 	pwd="\$(pwd)"
 	while [ "x\$(pwd)" != x/ ]; do
+		sync
 		mount --make-private . || ._tmp_reinit/busybox mount --make-private .
 		cd ..
 	done
 	cd -- "\$pwd"
 
+	sync
 	mount --make-private "\$newroot/\$putold" || ._tmp_reinit/busybox mount --make-private "\$newroot/\$putold"
 
 	sleep 0.1
 
 	# Swap / and the new root.
-	if ! (pivot_root "\$newroot" "\$newroot/\$putold" || ._tmp_reinit/busybox pivot_root "\$newroot" "\$newroot/\$putold"); then
+	sync
+	if ! (pivot_root "\$newroot" "\$newroot/\$putold" || ._tmp_reinit/busybox pivot_root "\$newroot" "\$newroot/\$putold"); then     # If failed
 
 		# Fallback to the original root when failed.
 		failed=1
@@ -309,8 +373,11 @@ if [ "x\$newroot" != x/ ]; then
 		nokill=0
 		keepfd=0
 		initargs=
+		sync
 		freeze
+		sync
 		cp -a ._tmp_reinit/clearfd ._tmp_reinit/login_tty ._tmp_reinit/busybox ._tmp_reinit/prepare_env /._tmp_reinit/
+		sync
 		cd /
 	fi
 fi
@@ -319,16 +386,23 @@ fi
 
 export newinit putold current_init nokill proc failed
 
+sync
 if [ \$keepfd == 0 ]; then
 	eval exec /._tmp_reinit/clearfd /._tmp_reinit/login_tty /dev/tty1 /._tmp_reinit/busybox ash /._tmp_reinit/prepare_env "\$initargs"
 else
 	eval exec /._tmp_reinit/login_tty /dev/tty1 /._tmp_reinit/busybox ash /._tmp_reinit/prepare_env "\$initargs"
 fi
 
+# If we failed, sync filesystems and reboot instead of panic
+sync
+reboot -f
+
 # Next step
 END
 chmod +x ._tmp_reinit/init
 cat >._tmp_reinit/prepare_env << END
+
+sync
 
 set +e
 trap '' \$(kill -l | sed 's/\s/\\n/g' | grep '[a-zA-Z]')
@@ -336,12 +410,15 @@ trap '' \$(kill -l | sed 's/\s/\\n/g' | grep '[a-zA-Z]')
 cd /
 
 # Now it's safe to kill all old processes.
-if [ \$nokill == 0 -a ! -z "\$proc" ]; then
-	kill -9 \$proc >/dev/null 2>/dev/null </dev/null
+if [ \$nokill == 0 ]; then
+	kill -9 -1 >/dev/null 2>/dev/null </dev/null
 fi
+sync
 
 # Unmount the old init.
 /._tmp_reinit/busybox umount -- "\$putold/\$current_init"
+
+clear
 
 # Alert when failed.
 if [ \$failed == 1 ]; then
@@ -350,11 +427,15 @@ if [ \$failed == 1 ]; then
 fi
 
 # Execute the new init in a clean environment.
+sync
 if [ \$nokill == 0 ]; then
 	exec /._tmp_reinit/busybox env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin "\$newinit" "\$@"
 else
 	exec /._tmp_reinit/busybox env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin oldproc="\$proc" "\$newinit" "\$@"
 fi
+
+sync
+reboot -f
 END
 
 # Mount the init script on the current init.
@@ -366,29 +447,39 @@ set +e
 # Stop display managers, otherwise tty1 would get frozen.
 if [ $nostop == 0 ]; then
 	for i in brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager; do
+		sync
 		service $i stop >/dev/null 2>/dev/null </dev/null
 	done
+	sync
 	systemctl stop brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager >/dev/null 2>/dev/null </dev/null
 	sleep 2
 fi
 
-
+sync
 
 # Seize the tty, so no messy outputs are going to them.
 if [ $nostop == 0 ]; then
+	sync
 	._tmp_reinit/login_tty /dev/tty1 sleep 99999999 &
+	sync
 	sleep 0.2
 fi
 
 # Go to tty1.
+sync
 chvt 1 >/dev/null 2>/dev/null </dev/null || ._tmp_reinit/busybox chvt 1 >/dev/null 2>/dev/null </dev/null || true
+sync
 sleep 0.1
+sync
 
 # Restart init.
 (telinit u >/dev/null 2>/dev/null </dev/null &)
 (systemctl daemon-reexec >/dev/null 2>/dev/null </dev/null &)
 
+sync
+
 # Stop the shell and getty to prevent them from exiting automatically, which resets the new init's controlling console and make it exit.
 if [ $nostop == 0 ]; then
 	killall -s SIGSTOP -- systemd-logind getty login "$(basename "$SHELL")" ash bash rbash bsh busybox csh dash esh fish ion ipython ksh mksh oh rc sh tcsh zsh node python python-3 python3 python-2 python2 nano vi vim ash bash rbash bsh busybox csh dash esh fish ion ipython ksh mksh oh rc sh tcsh zsh node python python-3 python3 python-2 python2 nano vi vim "$(basename "$SHELL")" login getty systemd-logind >/dev/null 2>/dev/null </dev/null
+	sync
 fi
