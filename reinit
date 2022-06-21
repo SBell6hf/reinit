@@ -6,25 +6,17 @@ export LC_ALL=C
 # Exit on error.
 set -e
 
-# echo "WARNING: This utility has not been thoroughly tested. It could freeze the machine or panic the kernel."
-# echo "         Maybe it won't, but anyway, make sure you have viewed each line of its code and that you fully understand them."
-# echo
-#echo "INFO: Press return / enter to continue: "
-#read
-# echo "         Edit the source code and remove the next exit statement."
-# exit -1
-
 # Initialize variables.
 newinit=
 newroot=/
 putold=/._tmp_reinit/oldroot
 umount=d
-for i in nokill nostop keepfd; do
+for i in inject nokill nostop keepfd; do
 	eval $i=0
 done
 
 # Parse options.
-options="$(getopt -o i:r:o:b::k::s::f::u::h::V:: -l newinit -l newroot -l putold -l bbinit -l nokill -l nostop -l keepfd -l umount -l no-umount -l help -l version -s bash -n reinit -- "$@")" || (echo "Try 'reinit --help' for more information." && exit 22)
+options="$(getopt -o i:r:o:b::j::k::s::f::u::h::V:: -l newinit -l newroot -l putold -l bbinit  -l inject -l nokill -l nostop -l keepfd -l umount -l no-umount -l help -l version -s bash -n reinit -- "$@")" || (echo "Try 'reinit --help' for more information." && exit 22)
 eval set -- "$options"
 
 while true; do
@@ -46,6 +38,10 @@ while true; do
 		shift 2
 	;;
 
+	-j|--inject)
+		inject=1
+		shift 2
+	;;
 	-k|--nokill)
 		nokill=1
 		shift 2
@@ -81,6 +77,7 @@ Options:
  -o, --putold   the path to mount the old root if --newroot is set;  default: /._tmp_reinit/putold
  -b, --bbinit   use busybox as the new init; you'll need to spicify an applet in init_options
 
+ -j, --inject      [EXPERIMENTAL] inject code into the init to force a restart, even if it is not responsive
  -k, --nokill      do not kill old processes; PIDs of old processes will be stored in environment variable \$oldproc
  -s, --nostop      do not stop old processes (implies --nokill); may make the kernel panic when used with -r
  -f, --keepfd      do not close fds for the new init
@@ -130,8 +127,8 @@ if ! qwhich which; then
 	}
 fi
 
-if ! qwhich "$(dirname -- "$0")"/{clearfd,login_tty,busybox}; then
-	echo "ERROR: Unable to find clearfd, login_tty and busybox!"
+if ! qwhich "$(dirname -- "$0")"/{clearfd,login_tty,busybox,takeover_process}; then
+	echo "ERROR: Unable to find clearfd, login_tty, busybox or takeover_process."
 	exit 22
 fi
 
@@ -141,7 +138,7 @@ if [ "$(id -u)" != 0 ]; then
 fi
 
 if ! qwhich telinit && ! qwhich systemctl; then
-	echo "ERROR: Unknown current init."
+	echo "ERROR: Unknown current init. Please try --inject."
 	exit 22
 fi
 
@@ -245,17 +242,17 @@ if [ $umount == d ]; then
 	fi
 fi
 
-#Initialize.
+# Initialize.
 
 mkdir -p -- "$newroot"/._tmp_reinit /._tmp_reinit
-cp -- "$(dirname "$0")"/{clearfd,login_tty,busybox} "$newroot"/._tmp_reinit/
+cp -- "$(dirname "$0")"/{clearfd,login_tty,busybox,takeover_process} "$newroot"/._tmp_reinit/
 
 cd -- "$newroot"
 
 mkdir -p ._tmp_reinit/oldroot
 mkdir -p dev proc
 
-# Save configs.
+# Save options.
 printf "%s" "$newinit" >/._tmp_reinit/newinit
 printf "%s" "$newroot" >/._tmp_reinit/newroot
 printf "%s" "$putold" >/._tmp_reinit/putold
@@ -268,7 +265,14 @@ printf "%s" "$current_init" >/._tmp_reinit/current_init
 cat >._tmp_reinit/init << END
 #!$newroot/._tmp_reinit/busybox ash
 
-# From now on we'll use sync frequently to avoid losing unsynced data if we panic.
+cd /
+cd /var/empty
+if [ -z "$PATH" ]; then
+	PATH="/dev/null"
+fi
+export PATH="$PATH:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# From now on we'll use sync frequently in case we panic to avoid losing unsynced data.
 sync
 
 # Do not exit on any errors or signals.
@@ -285,6 +289,7 @@ nokill=$nokill
 nostop=$nostop
 keepfd=$keepfd
 umount=$umount
+inject=$inject
 
 failed=0
 
@@ -384,7 +389,7 @@ fi
 
 # Close all fds (optional), become the session and pg leader and take over tty1.
 
-export newinit putold current_init nokill proc failed
+export newinit putold current_init nokill inject proc failed
 
 sync
 if [ \$keepfd == 0 ]; then
@@ -416,7 +421,9 @@ fi
 sync
 
 # Unmount the old init.
-/._tmp_reinit/busybox umount -- "\$putold/\$current_init"
+if [ \$inject != 1 ]; then
+	/._tmp_reinit/busybox umount -- "\$putold/\$current_init" 2>/dev/null
+fi
 
 clear
 
@@ -439,20 +446,37 @@ reboot -f
 END
 
 # Mount the init script on the current init.
-mount --bind -- ._tmp_reinit/init "$current_init"
+if [ $inject != 1 ]; then
+	mount --bind -- ._tmp_reinit/init "$current_init"
+fi
 
 trap '' $(kill -l | sed 's/\s/\n/g' | grep '[a-zA-Z]')
 set +e
 
 # Stop display managers, otherwise tty1 would get frozen.
 if [ $nostop == 0 ]; then
-	for i in brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager; do
-		sync
-		service $i stop >/dev/null 2>/dev/null </dev/null
-	done
+	if [ $inject == 1 ]; then
+		for i in brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager; do
+			sync
+			service $i stop >/dev/null 2>/dev/null </dev/null &
+		done
+	else
+		for i in brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager; do
+			sync
+			service $i stop >/dev/null 2>/dev/null </dev/null
+		done
+	fi
 	sync
-	systemctl stop brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager >/dev/null 2>/dev/null </dev/null
+	if [ $inject == 1 ]; then
+		systemctl stop brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager >/dev/null 2>/dev/null </dev/null &
+	else
+		systemctl stop brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager >/dev/null 2>/dev/null </dev/null
+	fi
+	killall -SIGINT brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager 2>/dev/null
+	killall -SITTERM brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager 2>/dev/null
 	sleep 2
+	killall -SIGKILL brzdm cdm emptty entrance gdm lightdm lxdm ly mdm mlogind qingy sddm slim tbsm tdm xdm display-manager 2>/dev/null
+	sleep 0.3
 fi
 
 sync
@@ -469,12 +493,16 @@ fi
 sync
 chvt 1 >/dev/null 2>/dev/null </dev/null || ._tmp_reinit/busybox chvt 1 >/dev/null 2>/dev/null </dev/null || true
 sync
-sleep 0.1
+sleep 0.2
 sync
 
 # Restart init.
-(telinit u >/dev/null 2>/dev/null </dev/null &)
-(systemctl daemon-reexec >/dev/null 2>/dev/null </dev/null &)
+if [ $inject == 1 ]; then
+	._tmp_reinit/takeover_process 1 "/._tmp_reinit/init" "/._tmp_reinit/init"
+else
+	(telinit u >/dev/null 2>/dev/null </dev/null &)
+	(systemctl daemon-reexec >/dev/null 2>/dev/null </dev/null &)
+fi
 
 sync
 

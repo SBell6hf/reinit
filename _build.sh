@@ -4,8 +4,9 @@ set -e
 cd "$(dirname "$0")"
 rm -rf _build
 mkdir _build
-gcc clearfd.c -o _build/clearfd -O3 --static
-gcc login_tty.c -o _build/login_tty -O3 --static -lutil
+gcc clearfd.c -o _build/clearfd -O3 --static -Werror
+gcc login_tty.c -o _build/login_tty -O3 --static -lutil -Werror
+gcc takeover_process.c -o _build/takeover_process -O3 --static -Werror
 strip _build/*
 if ! which busybox >/dev/null 2>/dev/null </dev/null; then
 	echo "ERROR: BusyBox is not found on this system."

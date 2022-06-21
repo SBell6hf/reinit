@@ -13,6 +13,7 @@ Options:
  -o, --putold   the path to mount the old root if --newroot is set;  default: /._tmp_reinit/putold
  -b, --bbinit   use busybox as the new init; you'll need to spicify an applet in init_options
 
+ -j, --inject      [EXPERIMENTAL] inject code into the init to force a restart, even if it is not responsive
  -k, --nokill      do not kill old processes; PIDs of old processes will be stored in environment variable $oldproc
  -s, --nostop      do not stop old processes (implies --nokill); may make the kernel panic when used with -r
  -f, --keepfd      do not close fds for the new init
