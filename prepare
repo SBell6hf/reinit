@@ -1,0 +1,228 @@
+#!/._tmp_reinit/busybox ash
+source /._tmp_reinit/busybox_aliases
+while true; do     # There's no `goto` statement in bash, so we use `while` and `continue` instead
+
+
+umask 0022
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# From now on we'll use sync frequently to avoid losing any unsynced data.
+sync
+
+# Do not exit on any errors or signals.
+set +e
+trap '' $(kill -l | sed 's/\s/\n/g' | grep '[a-zA-Z]')
+
+# Load options.
+newinit="$(cat /._tmp_reinit/newinit)"
+newroot="$(cat /._tmp_reinit/newroot)"
+putold="$(cat /._tmp_reinit/putold)"
+newpwd="$(cat /._tmp_reinit/newpwd)"
+initargs="$(cat /._tmp_reinit/initargs)"
+current_init="$(cat /._tmp_reinit/current_init)"
+failed="$(cat /._tmp_reinit/failed)"
+exec </._tmp_reinit/options
+read nostop nokill keepfd nochvt tty inject umount nochdir
+exec </dev/null
+
+sync
+
+# Unmount the old init.
+if [ $inject != 1 ]; then
+	umount -- "$current_init"
+	sync
+fi
+
+# Unmount VFS.
+if [ $umount == 1 ]; then
+	umount -lf /proc /dev /sys /run /tmp 2>/dev/null
+	sync
+fi
+
+# Mount dev and proc if they are not mounted
+if ! mountpoint -q /dev; then
+	mount -t devtmpfs udev /dev
+fi
+if ! mountpoint -q /proc; then
+	mount -t proc proc /proc
+fi
+if ! mountpoint -q "$newroot/dev"; then
+	mount -t devtmpfs udev "$newroot/dev"
+fi
+if ! mountpoint -q "$newroot/proc"; then
+	mount -t proc proc "$newroot/proc"
+fi
+sync
+
+# Clear screen.
+cls() {
+	clear
+	echo -ne '\033c\033[3J'
+}
+
+# Reset the keyboard and the display.
+resetkbddisp() {
+	cls
+	echo r >/proc/sysrq-trigger
+	echo v >/proc/sysrq-trigger
+	cls
+}
+
+if [ $nostop == 0 -a $keepfd == 1 ]; then
+	for i in 1 2 3; do
+		sync
+		resetkbddisp
+		sync
+		sleep 0.1
+	done
+	sync
+	resetkbddisp
+	sleep 0.1
+	sync
+fi
+
+if [ $nostop == 0 ]; then
+	sync
+	exec >/dev/tty4 2>/dev/tty4 </dev/tty4
+	sync
+	cls
+	sync
+fi
+
+# Fallback to the original root and init when failed.
+fail() {
+	sync
+
+	# Safe options.
+	printf "%s" "$current_init" >/._tmp_reinit/newinit
+	printf "%s" "$current_init" >/._tmp_reinit/current_init
+	echo 0 0 0 0 4 1 1 0 >/._tmp_reinit/options
+	echo -n "$putold" >/._tmp_reinit/newroot
+	echo -n "$newroot" >/._tmp_reinit/putold
+	echo -n / >/._tmp_reinit/newpwd
+	echo -n >/._tmp_reinit/initargs
+	echo -n $1 >/._tmp_reinit/failed
+
+	# Freeze processes.
+	cd /
+	for i in 1 2 3; do
+		sync
+		kill -s SIGSTOP -1
+		sync
+		sleep 0.1
+	done
+	sync
+
+	if [ -x "$/._tmp_reinit/initenv" ]; then
+		exec /._tmp_reinit/initenv
+	fi
+}
+
+if [ "x$newroot" != 'x/' ]; then
+	# Make all mounts private, as pivot_root doesn't work with shared mount points.
+
+	sync
+	/bin/mount --make-private / 2>/dev/null
+	mount --make-private / 2>/dev/null
+	sync
+	
+	oldpwd="$(pwd)"
+	cd -- "$newroot"
+	while [ "x$(pwd)" != 'x/' ]; do
+		sync
+		/bin/mount --make-private . 2>/dev/null
+		mount --make-private . 2>/dev/null
+		cd ..
+	done
+	cd -- "$oldpwd"
+
+	sync
+	/bin/mount --make-private "$newroot/$putold" 2>/dev/null
+	mount --make-private "$newroot/$putold" 2>/dev/null
+
+	sleep 0.1
+
+	# Swap / and the new root.
+	sync
+	if ! (pivot_root "$newroot" "$newroot/$putold" || /bin/pivot_root "$newroot" "$newroot/$putold"); then
+		newroot=/
+		putold=/
+		fail 1
+		continue     # Go to start if exec initenv failed
+	fi
+fi
+
+if [ $nokill == 1 ]; then
+	export oldproc=''
+	for i in $(ls -1 /proc | grep -E '^[0-9]+$' | grep -v '^1$' | grep -v ^$$'$'); do
+		if readlink proc/$i/exe >/dev/null 2>/dev/null </dev/null; then     # Skip kernel threads.
+			oldproc="$oldproc $i"
+		fi
+	done
+fi
+
+sync
+# Alert if failed.
+if [ $failed == 1 ]; then
+	cls
+	echo "reinit: ERROR: Failed to pivot_root. Falling back to the original root and init in 3 seconds."
+	sleep 3
+fi
+if [ $failed == 2 ]; then
+	cls
+	echo "reinit: ERROR: Failed to exec the new init. Falling back to the original root and init in 3 seconds."
+	sleep 3
+fi
+
+start_init() {
+	if [ -x "$newinit" ]; then
+		if [ $nostop == 1 ]; then
+			exec "$newinit" "$@"
+		else
+			if [ -x '/._tmp_reinit/login_tty' ]; then
+				exec /._tmp_reinit/login_tty /dev/tty4 "$newinit" "$@"
+			fi
+		fi
+	fi
+}
+
+if [ $nochdir == 0 ]; then
+	cd -- "$newpwd"
+fi
+
+eval start_init "$initargs"
+
+cd /
+if [ $failed == 0 ]; then
+	fail 2
+	continue
+fi
+
+sync
+cls
+echo "reinit: ERROR: Failed to execute the old init."
+echo "reinit: Starting a root shell for you."
+echo "reinit: Some commands might be unavaliable until you run the following command:"
+echo "        # source /._tmp_reinit/busybox_aliases"
+echo "reinit: Your PID is now 1. DO NOT EXIT or press CTRL-C without SYNCING THE DISK CACHE first."
+echo "reinit: Gook luck!"
+
+if [ -x "/._tmp_reinit/busybox" ]; then
+	exec /._tmp_reinit/busybox ash
+fi
+
+echo "reinit: ERROR: Failed to start a shell. Reboot in 3 seconds."
+
+sync
+sleep 3
+
+sync
+reboot -f
+echo b >/proc/sysrq-trigger
+
+sleep 0.2
+exit
+break
+
+
+done

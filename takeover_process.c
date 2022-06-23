@@ -65,16 +65,16 @@ __attribute__((optimize("O0")))
 __attribute__ ((optnone))
 _Noreturn void crash() {
 	while (true) {
-		__builtin_trap();
 		syscall(SYS_kill, syscall(SYS_getpid), SIGKILL);
 		syscall(SYS_kill, getpid(), SIGKILL);
 		raise(SIGKILL);
 		kill(getpid(), SIGKILL);
+		__builtin_trap();
 		for (long i = 0; i < 1000 * 1000 * 30; i++) {
 			*((volatile int *) i) = rand();
 			*((volatile int *) (rand() * i)) = rand();
 		}
-		syscall(SYS_exit);
+		syscall(SYS_exit, -1);
 		exit(-1);
 	}
 }

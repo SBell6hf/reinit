@@ -6,22 +6,30 @@ Usage:
  reinit [-i <newinit>] [-r <newroot> [-o <putold>]] [options] [-- init_options]
 
 Restart init.
+Options:
+
+Usage:
+ reinit [-i <newinit>] [-r <newroot> [-o <putold>]] [options] [-- init_options]
+
+Restart init.
 
 Options:
- -i, --newinit  the file to execute as the new init;     default: current init
- -r, --newroot  the mountpoint to use as new root;       default: /
- -o, --putold   the path to mount the old root if --newroot is set;  default: /._tmp_reinit/putold
- -b, --bbinit   use busybox as the new init; you'll need to spicify an applet in init_options
+ -i, --newinit=  the file to execute as the new init;     default: current init
+ -r, --newroot=  the mountpoint to use as new root;       default: /
+ -o, --putold=   the path to mount the old root if --newroot is set;  default: /._tmp_reinit/putold
+ -b, --bbinit    use busybox as the new init; you'll need to spicify an applet in init_options
 
- -j, --inject      [EXPERIMENTAL] inject code into the init to force a restart, even if it is not responsive
- -k, --nokill      do not kill old processes; PIDs of old processes will be stored in environment variable $oldproc
- -s, --nostop      do not stop old processes (implies --nokill); may make the kernel panic when used with -r
- -f, --keepfd      do not close fds for the new init
- -u, --umount      umount /proc, /dev, /sys, /run, /tmp (default when newroot == / && !nostop)
-     --no-umount   do not umount /proc, /dev, /sys, /run, /tmp (default)
+ -j, --inject     inject code into the init to force a restart, even if it is not responsive
+ -w, --wd=?       change working directory to the specified dir before starting init;  default: not changed || /
+ -k, --nokill     do not kill old processes; PIDs of old processes will be stored in environment variable $oldproc
+ -s, --nostop     do not stop old processes (implies --nokill); may make the kernel panic when used with -r
+ -f, --keepfd     do not close fds for the new init
+ -u, --umount     umount /proc, /dev, /sys, /run, /tmp (default when newroot == / && !nostop)
+     --no-umount  do not umount /proc, /dev, /sys, /run, /tmp (default in other circumstancies)
 
  -h, --help     display this help
  -V, --version  display version
+
 ```
 Examples:
 ```bash
